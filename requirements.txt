@@ -1,0 +1,13 @@
+# VoiceAI pinned dependencies (Python 3.11 venv)
+aiortc==1.15.0
+faster-whisper==1.2.1
+webrtcvad-wheels==2.0.14
+coqui-tts==0.27.5
+playsound==1.2.2
+fastapi==0.141.1
+uvicorn[standard]==0.52.4
+groq==1.6.0
+python-dotenv==1.2.3
+numpy<3
+soundfile>=0.14
+pygame==2.6.1

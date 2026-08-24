@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<!-- Single-page client: captures mic audio, negotiates WebRTC, plays AI voice,
+     and shows live transcripts coming over the /events WebSocket. -->
+<html lang="en">
+<head>
+  <!-- Proper character encoding for the UI text. -->
+  <meta charset="UTF-8" />
+  <!-- Responsive viewport so it also renders on mobile browsers. -->
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>VoiceAI</title>
+  <style>
+    /* Dark minimal theme so the demo looks clean. */
+    body { font-family: system-ui, sans-serif; background: #0f1117; color: #e6e6e6;
+           max-width: 720px; margin: 40px auto; padding: 0 16px; }
+    h1 { font-weight: 600; font-size: 1.5rem; }
+    #startBtn { background: #4f7cff; border: none; color: white; padding: 12px 28px;
+                font-size: 1rem; border-radius: 8px; cursor: pointer; }
+    #startBtn:disabled { opacity: .5; cursor: default; }
+    /* Status pill showing the current pipeline state (listening/thinking/speaking). */
+    #status { display:inline-block; margin-left: 14px; padding: 6px 14px; border-radius: 999px;
+              background:#1d2230; font-size:.9rem; }
+    .msg { margin: 10px 0; padding: 10px 14px; border-radius: 8px; max-width: 85%; }
+    .user { background:#2b3660; margin-left:auto; text-align:right; }   /* user bubble */
+    .ai   { background:#1e2433; }                                       /* AI bubble */
+    .log  { margin-top: 24px; display:flex; flex-direction:column; }
+    /* Hidden audio element that actually plays the incoming WebRTC track. */
+    #remoteAudio { display:none; }
+  </style>
+</head>
+<body>
+  <h1>🎙 VoiceAI</h1>
+
+  <!-- Click to request mic permission and start the WebRTC session. -->
+  <button id="startBtn">Start Talking</button>
+  <!-- Live pipeline status injected by JS. -->
+  <span id="status">idle</span>
+
+  <!-- Transcript bubbles get appended here. -->
+  <div class="log" id="log"></div>
+
+  <!-- Autoplay target for the server's outgoing (AI) audio track.
+       autoplay + playsinline are required by browser autoplay policies. -->
+  <audio id="remoteAudio" autoplay playsinline></audio>
+
+<script>
+  // Grab references once instead of querying the DOM repeatedly.
+  const startBtn = document.getElementById("startBtn");
+  const statusEl = document.getElementById("status");
+  const log = document.getElementById("log");
+  const remoteAudio = document.getElementById("remoteAudio");
+
+  // Map backend state strings to friendly labels shown in the pill.
+  const labels = {
+    listening: "🎧 Listening…",
+    transcribing: "📝 Transcribing…",
+    thinking: "🧠 Thinking…",
+    speaking: "🔊 Speaking…",
+  };
+
+  function setStatus(s) {
+    // Show mapped label when known, otherwise show raw state (errors).
+    statusEl.textContent = labels[s] || s;
+  }
+
+  function addMsg(role, text) {
+    // Create a chat bubble element for each transcript message.
+    const div = document.createElement("div");
+    div.className = "msg " + role;          // styles differ for user vs ai
+    div.textContent = text;                 // textContent prevents HTML injection
+    log.appendChild(div);
+    window.scrollTo(0, document.body.scrollHeight); // keep newest visible
+  }
+
+  startBtn.onclick = async () => {
+    startBtn.disabled = true;
+
+    // --- 1. Open the events WebSocket first so no early messages are lost ---
+    const ws = new WebSocket(`ws://${location.host}/events`);
+    ws.onmessage = (e) => {
+      const m = JSON.parse(e.data);
+      if (m.type === "status") setStatus(m.state);        // pipeline state pill
+      if (m.type === "user") addMsg("user", m.text);      // what you said
+      if (m.type === "ai") addMsg("ai", m.text);          // what the AI replied
+    };
+
+    // --- 2. Ask permission and open the microphone ---
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: true }, // cleaner VAD input
+    });
+
+    // --- 3. Set up the WebRTC peer connection ---
+    const pc = new RTCPeerConnection();
+
+    // Every local mic track gets sent to the server.
+    stream.getTracks().forEach((t) => pc.addTrack(t, stream));
+
+    // Incoming AI voice arrives here; attach it to the hidden <audio>.
+    pc.ontrack = (e) => (remoteAudio.srcObject = e.streams[0]);
+
+    // --- 4. SDP exchange over plain HTTP (no signaling library needed) ---
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);   // also starts gathering ICE candidates
+
+    const res = await fetch("/offer", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sdp: pc.localDescription.sdp, type: pc.localDescription.type }),
+    });
+    const answer = await res.json();
+    await pc.setRemoteDescription({ type: answer.type, sdp: answer.sdp });
+
+    setStatus("listening");
+  };
+</script>
+</body>
+</html>
