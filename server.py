@@ -49,6 +49,10 @@ from src.stt import transcribe                        # PCM -> text
 from src.llm_client import chat                       # text -> reply text
 from src.tts_engine import synthesize                 # text -> WAV bytes
 
+# OpenWakeWord detects a specific wake phrase ("hey jarvis") in the mic stream
+# before we start full STT pipeline, so the assistant only activates on command.
+from openwakeword.model import Model as OWWModel
+
 # Create the app instance uvicorn will serve on http://localhost:8000.
 app = FastAPI(title="VoiceAI")
 
@@ -61,6 +65,21 @@ clients = set()
 # Global "busy" flag: while True the mic stream is ignored so the AI isn't
 # interrupted by its own voice coming through the user's speakers.
 busy = False
+
+# Lazy-loaded OpenWakeWord model: scans every 16kHz mono chunk for "hey jarvis"
+# and only returns True when the wake phrase is detected. Loaded once on first
+# connection so the ~1.3MB ONNX model stays in memory thereafter.
+_oww_model = None
+
+def get_oww():
+    """Lazy-load the OpenWakeWord model so server startup stays instant."""
+    global _oww_model
+    if _oww_model is None:
+        _oww_model = OWWModel(
+            wakeword_models=[r"D:\Project\voiceai\models\hey_jarvis_v0.1.onnx"],
+            inference_framework="onnx",
+        )
+    return _oww_model
 
 
 # ---------- outbound audio player -------------------------------------------
@@ -226,53 +245,59 @@ async def run_turn(utterance: bytes, player: PlayerTrack):
 
     finally:
         busy = False
-        await broadcast({"type": "status", "state": "listening"})
+        await broadcast({"type": "status", "state": "waiting_for_wake_word"})
 
 
 # ---------- inbound mic consumer ---------------------------------------------
 
 async def consume_mic(track, player: PlayerTrack):
-    """Pull decoded mic frames off the WebRTC track, run VAD, trigger turns."""
+    """Pull decoded mic frames, run wake word -> VAD -> turns."""
 
     global busy
 
     # Resamples whatever the browser sends (Opus-decoded 48k stereo)
-    # down to exactly what VAD+whisper need: 16kHz mono signed-16bit.
+    # down to exactly what wake word/VAD+whisper need: 16kHz mono signed-16bit.
     resampler = av.AudioResampler(format="s16", layout="mono", rate=16000)
 
-    # Raw byte accumulator: resampled chunks arrive in odd sizes, but VAD
-    # requires exact 30ms (960-byte) slices, so we buffer and slice ourselves.
+    # Raw byte accumulator: resampled chunks arrive in odd sizes, but wake word
+    # model + VAD both require exact 30ms (960-byte) slices, so we buffer and slice.
     acc = bytearray()
     vad = VADetector()
+    activated = False          # True once wake word has been detected this turn
 
     while True:
         try:
-            # Await the next decoded audio frame from the network.
             frame = await track.recv()
         except MediaStreamError:
-            # Browser disconnected/closed the track -> end this consumer task.
             return
 
-        # Ignore user's mic entirely while the AI reply is playing (no barge-in v1),
-        # otherwise the speakers' output picked up by the mic would re-trigger STT.
         if busy:
             continue
 
-        # Resample returns a list (usually one) of converted mono 16k frames.
         for f in resampler.resample(frame):
-            # Flatten packed s16 data to raw little-endian PCM bytes.
             acc.extend(f.to_ndarray().reshape(-1).tobytes())
 
         # Process every complete 30ms window that has accumulated.
         while len(acc) >= FRAME_BYTES:
-            chunk = bytes(acc[:FRAME_BYTES])   # take exactly one VAD frame
-            del acc[:FRAME_BYTES]              # remove it from the buffer
-            utterance = vad.process(chunk)     # feed the state machine
+            chunk = bytes(acc[:FRAME_BYTES])
+            del acc[:FRAME_BYTES]
+
+            if not activated:
+                # Run wake word model on each 30ms chunk until it fires.
+                pcm16 = np.frombuffer(chunk, dtype=np.int16)
+                scores = get_oww().predict(pcm16)
+                # The model returns a dict; any score > threshold = wake word heard.
+                if any(v > 0.5 for v in scores.values()):
+                    activated = True
+                    await broadcast({"type": "status", "state": "listening"})
+                continue           # skip VAD entirely until activated
+
+            # Wake word detected -> now feed audio through VAD as before.
+            utterance = vad.process(chunk)
 
             if utterance is not None and not busy:
-                # Full utterance detected -> fire the pipeline without blocking
-                # the mic loop (it keeps running/VAD-resetting meanwhile).
                 busy = True
+                activated = False   # reset after this turn so wake word must be said again
                 asyncio.ensure_future(run_turn(utterance, player))
 
 
@@ -334,7 +359,7 @@ async def events(ws: WebSocket):
     clients.add(ws)
 
     # Tell the new tab immediately where things stand.
-    await ws.send_json({"type": "status", "state": "listening"})
+    await ws.send_json({"type": "status", "state": "waiting_for_wake_word"})
 
     try:
         # We never expect client messages; just hold the socket open,
