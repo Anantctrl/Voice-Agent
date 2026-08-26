@@ -47,4 +47,6 @@ def transcribe(pcm16_bytes: bytes) -> str:
 
     # Segments are generators of timed text pieces; join them into one sentence string.
     text = " ".join(s.text.strip() for s in segments).strip()
+    print("STT")
+    print(text)
     return text

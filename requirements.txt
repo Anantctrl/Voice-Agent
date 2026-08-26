@@ -13,3 +13,4 @@ soundfile>=0.14
 pygame==2.6.1
 openwakeword>=0.6.0
 onnxruntime>=1.17.0
+langchain-text-splitters>=1.1.2

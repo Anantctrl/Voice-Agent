@@ -48,11 +48,27 @@
     statusEl.className = (s === "waiting_for_wake_word") ? "pulse" : "";
   }
 
+  // Track the current AI bubble so streaming sentences append to it
+  // instead of creating a new bubble for every fragment.
+  let currentAiDiv = null;
+
   function addMsg(role, text) {
     const div = document.createElement("div");
     div.className = "msg " + role;
     div.textContent = text;
     log.appendChild(div);
+    window.scrollTo(0, document.body.scrollHeight);
+    return div;
+  }
+
+  function startAiBubble() {
+    currentAiDiv = addMsg("ai", "");
+    return currentAiDiv;
+  }
+
+  function appendAiText(text) {
+    if (!currentAiDiv) startAiBubble();
+    currentAiDiv.textContent += (currentAiDiv.textContent ? " " : "") + text;
     window.scrollTo(0, document.body.scrollHeight);
   }
 
@@ -62,9 +78,18 @@
     const ws = new WebSocket(`ws://${location.host}/events`);
     ws.onmessage = (e) => {
       const m = JSON.parse(e.data);
-      if (m.type === "status") setStatus(m.state);
+      if (m.type === "status") {
+        setStatus(m.state);
+        // When a new turn starts (thinking), reset the AI bubble tracker.
+        if (m.state === "thinking") currentAiDiv = null;
+      }
       if (m.type === "user") addMsg("user", m.text);
-      if (m.type === "ai")   addMsg("ai", m.text);
+      if (m.type === "ai_stream") {
+        // Each sentence arrives separately; append to the current bubble.
+        if (!currentAiDiv) startAiBubble();
+        appendAiText(m.text);
+      }
+      if (m.type === "ai") addMsg("ai", m.text);
     };
 
     const stream = await navigator.mediaDevices.getUserMedia({

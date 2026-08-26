@@ -15,11 +15,11 @@ FRAME_BYTES = 960
 
 # Require 3 consecutive voiced frames (~90ms) before we call it speech,
 # to avoid reacting to clicks/coughs/short noise bursts.
-SPEECH_START_FRAMES = 3
+SPEECH_START_FRAMES = 2
 
 # Require ~23 consecutive silent frames (~700ms of trailing silence) before we call
 # the utterance finished, so natural mid-sentence pauses don't cut the user off.
-SPEECH_END_FRAMES = 23
+SPEECH_END_FRAMES = 16
 
 # Discard utterances shorter than 0.4s (12800 bytes) because they are almost always
 # background noise or a lip-smack that survived the start filter.

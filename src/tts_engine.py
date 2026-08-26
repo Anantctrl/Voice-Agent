@@ -8,6 +8,9 @@ Coqui model, but return raw WAV data instead of writing/playing a file.
 # BytesIO lets us build the WAV entirely in memory (no temp files on disk).
 import io
 
+# re is used to whitelist only LJSpeech-safe characters for Tacotron2.
+import re
+
 # numpy is needed to shape the waveform samples for soundfile.
 import numpy as np
 
@@ -20,6 +23,19 @@ from TTS.api import TTS
 # Global singleton because loading tacotron2-DDC takes seconds and ~1GB RAM;
 # we must do that once, not per reply.
 _tts = None
+
+
+def sanitize_text(text: str) -> str:
+    """Whitelist only characters Tacotron2 was trained on (LJSpeech).
+
+    LJSpeech vocabulary: a-z, 0-9, space, period, comma, question mark,
+    exclamation, colon, semicolon, apostrophe, hyphen. Everything else
+    is stripped so the model never sees an unsupported character.
+    """
+    text = text.lower()
+    text = re.sub(r'[^a-z0-9 .,?!:;\-\']', '', text)
+    text = re.sub(r'\s+', ' ', text).strip()
+    return text
 
 
 def _get_tts() -> TTS:
@@ -37,6 +53,10 @@ def synthesize(text: str) -> bytes:
     # Collapse all whitespace runs and strip the ends: stray spaces around words
     # are enough to send Tacotron2's attention into an endless-garble loop.
     text = " ".join(text.split())
+
+    # Whitelist only LJSpeech-safe characters so Tacotron2 never sees
+    # unsupported punctuation that causes vocabulary warnings or garbled speech.
+    text = sanitize_text(text)
 
     # First synthesis pass.
     wav = np.array(_get_tts().tts(text=text))
