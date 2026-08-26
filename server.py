@@ -70,8 +70,10 @@ from aiortc import RTCPeerConnection, RTCSessionDescription
 # MediaStreamError is raised by inbound tracks when the browser disconnects.
 from aiortc.mediastreams import MediaStreamTrack, MediaStreamError
 
-from src.vad import VADetector, FRAME_BYTES          # speech start/end detection
-from src.stt import transcribe                        # PCM -> text
+from src.vad import (VADetector, FRAME_BYTES,        # streaming speech detection
+                     extract_segments,                # Silero VAD segment extraction
+                     extract_segment_audio)           # PCM slice for one segment
+from src.stt import transcribe                        # PCM -> text (per segment)
 from src.llm_client import chat_stream                 # streaming LLM tokens
 from src.tts_engine import synthesize                 # text -> WAV bytes
 
@@ -590,9 +592,23 @@ async def run_turn(utterance: bytes, player: PlayerTrack):
     try:
         await broadcast({"type": "status", "state": "transcribing"})
 
-        # whisper is pure CPU blocking work -> run it in a worker thread
-        # so the asyncio loop keeps serving WebRTC frames meanwhile.
-        text = await asyncio.to_thread(transcribe, utterance)
+        # Phase 1: Silero VAD extracts speech segments from the utterance.
+        # This finds precise timestamps for each speech region, handling
+        # mid-utterance pauses that WebRTC VAD let through.
+        metrics.stt_start = time.monotonic()
+        segments = await asyncio.to_thread(extract_segments, utterance)
+
+        # Phase 2: Transcribe each segment independently and merge.
+        # Shorter, cleaner segments give Whisper better accuracy.
+        transcripts = []
+        for seg in segments:
+            seg_audio = extract_segment_audio(utterance, seg)
+            seg_text = await asyncio.to_thread(transcribe, seg_audio)
+            if seg_text:
+                transcripts.append(seg_text)
+
+        # Merge transcripts in order — segments are already sorted by timestamp.
+        text = " ".join(transcripts).strip()
         metrics.stt_end = time.monotonic()
 
         if not text:

@@ -17,7 +17,7 @@ _SYSTEM = (
     "unless the user explicitly asks for detail. "
     "Never use special characters like *, #, [], _, ~, or emojis. "
     "Only use plain text and basic punctuation (period, comma, question mark, exclamation)."
-    "Your reply must be in natural, human-like English. With slighly umm , hn text"
+    "Your reply must be in natural, human-like English. With slighly "
 )
 
 

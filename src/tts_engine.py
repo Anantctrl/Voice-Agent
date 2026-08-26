@@ -30,10 +30,10 @@ def sanitize_text(text: str) -> str:
 
     LJSpeech vocabulary: a-z, 0-9, space, period, comma, question mark,
     exclamation, colon, semicolon, apostrophe, hyphen. Everything else
-    is stripped so the model never sees an unsupported character.
+    is replaced with a space (not deleted) so words don't merge together.
     """
     text = text.lower()
-    text = re.sub(r'[^a-z0-9 .,?!:;\-\']', '', text)
+    text = re.sub(r'[^a-z0-9 .,?!:;\-\']', ' ', text)
     text = re.sub(r'\s+', ' ', text).strip()
     return text
 
@@ -59,7 +59,12 @@ def synthesize(text: str) -> bytes:
     text = sanitize_text(text)
 
     # First synthesis pass.
-    wav = np.array(_get_tts().tts(text=text))
+    try:
+        wav = np.array(_get_tts().tts(text=text))
+    except RuntimeError:
+        # Tacotron2 attention diverged on this text — retry with a trailing
+        # period which forces the decoder to stop cleanly.
+        wav = np.array(_get_tts().tts(text=text + "."))
 
     # Ask the synthesizer itself for its output sample rate (22050 for this model)
     # instead of hardcoding it, in case the model is swapped later.

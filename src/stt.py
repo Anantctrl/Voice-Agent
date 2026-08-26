@@ -43,6 +43,7 @@ def transcribe(pcm16_bytes: bytes) -> str:
         language="en",
         beam_size=1,
         vad_filter=True,
+        condition_on_previous_text=False # to prevent form the hallucination in one chunk 
     )
 
     # Segments are generators of timed text pieces; join them into one sentence string.
