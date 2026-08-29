@@ -13,11 +13,13 @@ from typing import Callable, Optional, Tuple
 from ..constants.audio import PipelineConfig
 from .chunk_processor import ChunkProcessor, MonoResamplerPcm16Processor
 from .consumer import Consumer, NoOpSpeechToTextSink, SpeechToTextSink
+from .feature_extractor import FeatureExtractor, MelSpectrogramExtractor
 from .input_queue import InputQueue
 from .producer import Producer
 from .reorder_buffer import ReorderBuffer
 from .ring_queue import CompletedQueue, RingQueue
 from .sequence_assigner import SequenceAssigner
+from .window_accumulator import WindowAccumulator
 from .worker_pool import WorkerPool
 
 ProducerFactory = Callable[[InputQueue, SequenceAssigner], Producer]
@@ -37,17 +39,20 @@ class PipelineController:
         *,
         processor: Optional[ChunkProcessor] = None,
         sink: Optional[SpeechToTextSink] = None,
+        extractor: Optional[FeatureExtractor] = None,
         max_input_queue: int = PipelineConfig.MAX_INPUT_QUEUE,
         num_workers: int = PipelineConfig.NUM_WORKERS,
         ring_size: int = PipelineConfig.RING_SIZE,
     ) -> None:
         self._processor = processor or MonoResamplerPcm16Processor()
         self._sink = sink or NoOpSpeechToTextSink()
+        self._feature_extractor = extractor or MelSpectrogramExtractor()
 
         self._input_queue = InputQueue(maxsize=max_input_queue)
         self._assigner = SequenceAssigner()
         self._completed_queue = CompletedQueue()
         self._ring_queue = RingQueue(size=ring_size)
+        self._window_queue = CompletedQueue()
 
         self._producer = producer_factory(self._input_queue, self._assigner)
 
@@ -58,7 +63,10 @@ class PipelineController:
             num_workers=num_workers,
         )
         self._reorder = ReorderBuffer(self._completed_queue, self._ring_queue)
-        self._consumer = Consumer(self._ring_queue, self._sink)
+        self._window_accumulator = WindowAccumulator(self._ring_queue, self._window_queue)
+        self._consumer = Consumer(
+            self._window_queue, self._sink, extractor=self._feature_extractor
+        )
 
     def run(self) -> None:
         """Start background stages and run the producer on the calling thread."""
@@ -67,6 +75,11 @@ class PipelineController:
         threads = [
             threading.Thread(target=self._worker_pool.run, name="worker-pool", daemon=True),
             threading.Thread(target=self._reorder.run, name="reorder", daemon=True),
+            threading.Thread(
+                target=self._window_accumulator.run,
+                name="window-accumulator",
+                daemon=True,
+            ),
             threading.Thread(target=self._consumer.run, name="consumer", daemon=True),
         ]
         for thread in threads:
@@ -87,6 +100,27 @@ class PipelineController:
     @property
     def ring_queue(self) -> RingQueue:
         return self._ring_queue
+
+    @property
+    def window_queue(self) -> CompletedQueue:
+        return self._window_queue
+
+    @property
+    def window_accumulator(self) -> WindowAccumulator:
+        return self._window_accumulator
+
+    @property
+    def feature_extractor(self) -> FeatureExtractor:
+        return self._feature_extractor
+
+    @property
+    def reorder(self) -> ReorderBuffer:
+        return self._reorder
+
+    @property
+    def failed_count(self) -> int:
+        """Number of chunks skipped due to worker errors."""
+        return self._reorder.failed_count
 
     @property
     def consumer(self) -> Consumer:

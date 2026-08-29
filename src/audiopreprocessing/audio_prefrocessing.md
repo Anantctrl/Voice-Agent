@@ -143,7 +143,10 @@ THE APPROACH :
          0 → 1 → 2 → 3 → 4 ...
                      ▼
                     Ring Queue
-
+                    
+                    │
+                    ▼
+         
                     
 
 import queue
@@ -351,6 +354,129 @@ with sd.InputStream(
     print("Listening...")
 
     threading.Event().wait()
+
+
+
+# =============================================================================
+# MEL-SPECTROGRAM FEATURE-EXTRACTION STAGE
+# (Window accumulator + log-Mel extractor, feeding the STT consumer)
+# =============================================================================
+
+Now that ordered mono 16 kHz PCM16 chunks reach the ring queue, a new stage
+buffers them into fixed-length windows and converts each window to an 80-bin
+log-Mel spectrogram before handing it to the STT backend.
+
+New pipeline layout:
+
+    ReorderBuffer → RingQueue → WindowAccumulator
+                                    │
+                               window_queue
+                                    ▼
+                        MelSpectrogramExtractor (FeatureExtractor)
+                                    │
+                               consumer → sink.feed(mel)
+                                    │
+                                   STT
+
+## Configuration (constants/audio.py -> MelConfig)
+
+    class MelConfig:
+        SAMPLE_RATE: int = 16000
+        WINDOW_SECONDS: int = 30
+        WINDOW_SAMPLES: int = SAMPLE_RATE * WINDOW_SECONDS   # 480,000
+        N_FFT: int = 400
+        HOP_LENGTH: int = 160
+        N_MELS: int = 80
+
+## AudioWindow model (models/audio_window.py)
+
+    @dataclass(frozen=True)
+    class AudioWindow:
+        start_sequence: int      # first chunk folded into this window
+        end_sequence: int        # last chunk folded into this window
+        samples: np.ndarray      # float32 normalized [-1,1], length == WINDOW_SAMPLES
+        is_padded: bool          # True if zero-padded to reach a full window
+
+    __post_init__ validates dtype == float32 and ndim == 1.
+
+## WindowAccumulator (services/window_accumulator.py)
+
+Reads ordered PCM16 chunks from the ring queue, converts each to float32 via
+`chunk.samples / AudioConfig.PCM16_SCALE` (32767), and buffers them until at
+least `WINDOW_SAMPLES` (480,000) samples are present. On full: `_flush(pad=False)`
+emits an `AudioWindow` and resets the buffer. On the producer's STOP sentinel:
+if a partial buffer remains it is `_flush(pad=True)` zero-padded, then STOP is
+forwarded to the window queue.
+
+  * `_flush(pad)` concatenates buffered chunks, zero-pads a short window when
+    `pad` is True, truncates any overshoot beyond `WINDOW_SAMPLES`, then enqueues.
+  * Empty ring-queue pops back off for `poll_seconds` (from
+    `PipelineConfig.CONSUMER_POLL_SECONDS`, 1 ms) instead of busy-spinning —
+    the same throttled-polling pattern used by the Consumer stage.
+
+## FeatureExtractor / MelSpectrogramExtractor (services/feature_extractor.py)
+
+    class FeatureExtractor(ABC):
+        @abstractmethod
+        def extract(self, window: AudioWindow) -> np.ndarray: ...
+
+    class MelSpectrogramExtractor(FeatureExtractor):
+        def __init__(self, *, n_fft=MelConfig.N_FFT,
+                     hop_length=MelConfig.HOP_LENGTH, n_mels=MelConfig.N_MELS,
+                     sample_rate=MelConfig.SAMPLE_RATE):
+            # note: hop_length is NOT passed to filters.mel
+            self._mel_filters = librosa.filters.mel(sr=sample_rate,
+                                                    n_fft=n_fft, n_mels=n_mels)
+
+        def extract(self, window):
+            stft = librosa.stft(window.samples, n_fft=self._n_fft,
+                                hop_length=self._hop_length, window="hann")
+            power = np.abs(stft) ** 2
+            mel = self._mel_filters @ power
+            log_mel = np.log10(np.clip(mel, a_min=1e-10, a_max=None))
+            log_mel = np.maximum(log_mel, log_mel.max() - 8.0)
+            return ((log_mel + 4.0) / 4.0).astype(np.float32)  # shape (80, ~3000)
+
+Notes:
+  * `librosa.filters.mel` (v0.11.0) does NOT accept `hop_length`; it is only
+    applied to `librosa.stft`.
+  * The final normalization matches Whisper's preprocessing convention; drop it
+    if the STT model expects raw log-Mel instead.
+
+## Consumer changes (services/consumer.py)
+
+`SpeechToTextSink.feed()` now accepts a mel feature array instead of an
+`AudioChunk`:
+
+    class SpeechToTextSink(ABC):
+        @abstractmethod
+        def feed(self, mel: np.ndarray) -> bool: ...
+
+The `Consumer` reads `AudioWindow`s from the window queue, runs
+`extractor.extract(window)`, and forwards the resulting `(80, ~3000)` array to
+`feed()`. `Consumer.consumed_count` now counts mel windows (one per 30 s
+window) rather than raw 20 ms chunks.
+
+## Wiring (services/pipeline_controller.py)
+
+`PipelineController` now constructs `window_queue`, `WindowAccumulator`, and
+`MelSpectrogramExtractor`, and starts an additional `window-accumulator`
+daemon thread between the reorder buffer and the consumer:
+
+    self._window_queue = CompletedQueue()
+    self._window_accumulator = WindowAccumulator(self._ring_queue, self._window_queue)
+    self._consumer = Consumer(self._window_queue, self._sink, extractor=...)
+
+## Latency tradeoff
+
+This is an intentional architectural batching decision: a 30-second window must
+fill before the first feature array is emitted, so downstream STT now waits up
+to 30 s per window (or until input end, when a short window is zero-padded and
+flushed). The pipeline remains low-latency *up to* the window boundary; a later
+optimization could emit partial/sliding windows if that latency proves
+unacceptable.
+
+
 
 
 

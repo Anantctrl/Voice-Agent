@@ -35,3 +35,16 @@ class AudioChunk:
             raise TypeError("samples must be PCM16 (int16) after processing")
         if self.samples.ndim != 1:
             raise ValueError("samples must be a one-dimensional mono buffer")
+
+
+@dataclass(frozen=True)
+class ProcessingFailure:
+    """Marker enqueued when a worker task fails.
+
+    Carries the failed sequence and the caught exception so downstream stages
+    can keep the ordered stream advancing instead of stalling on the missing
+    chunk.
+    """
+
+    sequence: int
+    error: Exception

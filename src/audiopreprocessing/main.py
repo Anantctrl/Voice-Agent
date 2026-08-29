@@ -11,21 +11,19 @@ Usage:
 import argparse
 from typing import List, Optional
 
+import numpy as np
+
 from .constants.audio import AudioConfig
-from .models.audio_chunk import AudioChunk
 from .services.consumer import SpeechToTextSink
 from .services.pipeline_controller import PipelineController
 from .services.producer import FileProducer, MicrophoneProducer
 
 
 class LoggingSink(SpeechToTextSink):
-    """Diagnostic sink: logs each ordered chunk delivered to the STT stage."""
+    """Diagnostic sink: logs each mel window delivered to the STT stage."""
 
-    def feed(self, chunk: AudioChunk) -> bool:
-        print(
-            f"Sending chunk {chunk.sequence} to STT "
-            f"({chunk.num_samples} samples @ {chunk.output_sample_rate} Hz)"
-        )
+    def feed(self, mel: np.ndarray) -> bool:
+        print(f"Sending mel feature to STT (shape {mel.shape}, {mel.dtype})")
         return True
 
 
