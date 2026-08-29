@@ -44,10 +44,19 @@ class WindowAccumulator:
         samples = (
             np.concatenate(self._buffer) if self._buffer else np.zeros(0, dtype=np.float32)
         )
-        if pad and samples.size < self._window_samples:
-            samples = np.pad(samples, (0, self._window_samples - samples.size))
-        elif samples.size > self._window_samples:
+
+        # Defensive: never emit a fabricated window when there's no audio.
+        if samples.size == 0:
+            self._buffer, self._buffered_len = [], 0
+            self._start_seq = None
+            return
+
+        leftover = None
+        if samples.size > self._window_samples:
+            leftover = samples[self._window_samples:]
             samples = samples[: self._window_samples]
+        elif pad and samples.size < self._window_samples:
+            samples = np.pad(samples, (0, self._window_samples - samples.size))
 
         self._window_queue.put(AudioWindow(
             start_sequence=self._start_seq,
@@ -55,8 +64,19 @@ class WindowAccumulator:
             samples=samples,
             is_padded=pad,
         ))
-        self._buffer, self._buffered_len = [], 0
-        self._start_seq = None
+
+        if leftover is not None and leftover.size > 0:
+            self._buffer = [leftover]
+            self._buffered_len = leftover.size
+            # start_seq for the new window is technically mid-chunk here; the
+            # chunk sequence that produced the leftover is the best available
+            # approximation. Whisper only reads the sample data, so this is
+            # fine; don't build timing/re-sync logic on these fields without
+            # accounting for a window start that straddles a chunk.
+            self._start_seq = self._last_seq
+        else:
+            self._buffer, self._buffered_len = [], 0
+            self._start_seq = None
 
     def run(self) -> None:
         """Consume the ring queue until STOP, emitting fixed-length windows."""
