@@ -65,3 +65,43 @@ def to_pcm16(samples: np.ndarray) -> np.ndarray:
     """
     clipped = np.clip(samples, -1.0, 1.0)
     return (clipped * AudioConfig.PCM16_SCALE).astype(np.int16)
+
+
+class Pcm16WavWriter:
+    """Streams ordered PCM16 mono samples to a WAV file.
+
+    Opens the target file once with the given sample rate, appends each received
+    int16 chunk, and flushes + closes on ``close()``. Used to persist the
+    processed (mono -> 16 kHz -> PCM16) audio as it flows through the pipeline.
+    """
+
+    def __init__(self, file_path: str, sample_rate: int) -> None:
+        import soundfile as sf
+
+        self._file_path = file_path
+        self._sample_rate = sample_rate
+        self._sf = sf.SoundFile(
+            file_path,
+            mode="w",
+            samplerate=sample_rate,
+            channels=1,
+            subtype="PCM_16",
+        )
+
+    def write(self, samples: np.ndarray) -> None:
+        """Append an int16 mono buffer to the file."""
+        pcm = np.asarray(samples, dtype=np.int16)
+        if pcm.ndim == 1:
+            pcm = pcm.reshape(-1, 1)
+        self._sf.write(pcm)
+
+    def close(self) -> None:
+        if self._sf is not None:
+            self._sf.close()
+            self._sf = None
+
+    def __del__(self) -> None:
+        try:
+            self.close()
+        except Exception:
+            pass

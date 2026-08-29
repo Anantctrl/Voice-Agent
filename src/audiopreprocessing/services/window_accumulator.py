@@ -8,6 +8,7 @@ import numpy as np
 from ..constants.audio import AudioConfig, MelConfig, PipelineConfig
 from ..models.audio_chunk import AudioChunk
 from ..models.audio_window import AudioWindow
+from ..utils.audio_utils import Pcm16WavWriter
 from .producer import STOP
 from .ring_queue import RingQueue
 
@@ -26,11 +27,13 @@ class WindowAccumulator:
         *,
         window_samples: int = MelConfig.WINDOW_SAMPLES,
         poll_seconds: float = PipelineConfig.CONSUMER_POLL_SECONDS,
+        wav_writer: Optional[Pcm16WavWriter] = None,
     ) -> None:
         self._ring_queue = ring_queue
         self._window_queue = window_queue
         self._window_samples = window_samples
         self._poll_seconds = poll_seconds
+        self._wav_writer = wav_writer
 
         self._buffer: list[np.ndarray] = []
         self._buffered_len = 0
@@ -68,10 +71,14 @@ class WindowAccumulator:
             if item is STOP:
                 if self._buffer:
                     self._flush(pad=True)
+                if self._wav_writer is not None:
+                    self._wav_writer.close()
                 self._window_queue.put(STOP)
                 break
 
             chunk: AudioChunk = item
+            if self._wav_writer is not None:
+                self._wav_writer.write(chunk.samples)
             float_samples = chunk.samples.astype(np.float32) / AudioConfig.PCM16_SCALE
             if self._start_seq is None:
                 self._start_seq = chunk.sequence

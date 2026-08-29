@@ -10,7 +10,8 @@ queue that the controller constructs internally.
 
 from typing import Callable, Optional, Tuple
 
-from ..constants.audio import PipelineConfig
+from ..constants.audio import AudioConfig, PipelineConfig
+from ..utils.audio_utils import Pcm16WavWriter
 from .chunk_processor import ChunkProcessor, MonoResamplerPcm16Processor
 from .consumer import Consumer, NoOpSpeechToTextSink, SpeechToTextSink
 from .feature_extractor import FeatureExtractor, MelSpectrogramExtractor
@@ -40,6 +41,7 @@ class PipelineController:
         processor: Optional[ChunkProcessor] = None,
         sink: Optional[SpeechToTextSink] = None,
         extractor: Optional[FeatureExtractor] = None,
+        output_wav: Optional[str] = None,
         max_input_queue: int = PipelineConfig.MAX_INPUT_QUEUE,
         num_workers: int = PipelineConfig.NUM_WORKERS,
         ring_size: int = PipelineConfig.RING_SIZE,
@@ -63,7 +65,16 @@ class PipelineController:
             num_workers=num_workers,
         )
         self._reorder = ReorderBuffer(self._completed_queue, self._ring_queue)
-        self._window_accumulator = WindowAccumulator(self._ring_queue, self._window_queue)
+
+        wav_writer: Optional[Pcm16WavWriter] = None
+        if output_wav is not None:
+            wav_writer = Pcm16WavWriter(output_wav, AudioConfig.TARGET_SAMPLE_RATE)
+        self._output_wav = output_wav
+        self._wav_writer = wav_writer
+
+        self._window_accumulator = WindowAccumulator(
+            self._ring_queue, self._window_queue, wav_writer=wav_writer
+        )
         self._consumer = Consumer(
             self._window_queue, self._sink, extractor=self._feature_extractor
         )
@@ -108,6 +119,10 @@ class PipelineController:
     @property
     def window_accumulator(self) -> WindowAccumulator:
         return self._window_accumulator
+
+    @property
+    def output_wav(self) -> Optional[str]:
+        return self._output_wav
 
     @property
     def feature_extractor(self) -> FeatureExtractor:

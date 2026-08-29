@@ -38,6 +38,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Replay a WAV file offline instead of capturing from the microphone.",
     )
+    parser.add_argument(
+        "--output",
+        metavar="WAV",
+        default=None,
+        help="Write the processed (mono -> 16 kHz -> PCM16) audio to this file.",
+    )
     return parser
 
 
@@ -68,13 +74,19 @@ def main(argv: Optional[List[str]] = None) -> int:
     else:
         print("Live mode: capturing from microphone (Ctrl+C to stop).")
 
+    if args.output:
+        print(f"Will write processed audio to: {args.output}")
+
     controller = PipelineController(
         build_producer_factory(args),
         sink=LoggingSink(),
+        output_wav=args.output,
     )
 
     controller.run()
     print(f"Done. Chunks consumed by STT stage: {controller.consumer.consumed_count}")
+    if controller.output_wav:
+        print(f"Processed audio saved to: {controller.output_wav}")
     return 0
 
 
