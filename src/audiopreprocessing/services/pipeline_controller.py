@@ -83,6 +83,9 @@ class PipelineController:
         """Start background stages and run the producer on the calling thread."""
         import threading
 
+        # START PRODUCER FIRST - so data flows immediately when workers start
+        self._producer.start()
+
         threads = [
             threading.Thread(target=self._worker_pool.run, name="worker-pool", daemon=True),
             threading.Thread(target=self._reorder.run, name="reorder", daemon=True),
@@ -96,10 +99,8 @@ class PipelineController:
         for thread in threads:
             thread.start()
 
-        try:
-            self._producer.start()
-        finally:
-            self._input_queue.join()
+        # REMOVED: self._input_queue.join()
+        # No longer block waiting for queue to drain; producer runs concurrently
 
         for thread in threads:
             thread.join(timeout=5.0)

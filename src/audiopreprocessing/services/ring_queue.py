@@ -37,6 +37,7 @@ class RingQueue:
         self._size = size
         self._buffer: deque = deque(maxlen=size)
         self._lock = threading.Lock()
+        self._not_full = threading.Condition(self._lock)  # ← ADDED
         self._closed = False
 
     @property
@@ -58,9 +59,11 @@ class RingQueue:
         with self._lock:
             if self._closed:
                 raise PipelineStoppedError("ring queue is closed")
-            overflowed = len(self._buffer) >= self._size
+            # BLOCK if full instead of silently dropping
+            while len(self._buffer) >= self._size:
+                self._not_full.wait()
             self._buffer.append(item)
-            return overflowed
+            return False
 
     def pop(self) -> Optional[Any]:
         """Pop and return the oldest item (or None when empty)."""
