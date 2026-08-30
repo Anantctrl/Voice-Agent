@@ -1,0 +1,110 @@
+"""Accumulates ordered PCM16 chunks into fixed-length windows for feature extraction."""
+
+import threading
+from typing import Optional
+
+import numpy as np
+
+from ..constants.audio import AudioConfig, MelConfig, PipelineConfig
+from ..models.audio_chunk import AudioChunk
+from ..models.audio_window import AudioWindow
+from ..utils.audio_utils import Pcm16WavWriter
+from .producer import STOP
+from .ring_queue import RingQueue
+
+
+class WindowAccumulator:
+    """Buffers ordered PCM16 chunks until a full window (default 30 s) is ready.
+
+    Converts PCM16 -> normalized float32 as chunks arrive, and emits a
+    zero-padded final window on shutdown if a partial window remains.
+    """
+
+    def __init__(
+        self,
+        ring_queue: RingQueue,
+        window_queue,
+        *,
+        window_samples: int = MelConfig.WINDOW_SAMPLES,
+        poll_seconds: float = PipelineConfig.CONSUMER_POLL_SECONDS,
+        wav_writer: Optional[Pcm16WavWriter] = None,
+    ) -> None:
+        self._ring_queue = ring_queue
+        self._window_queue = window_queue
+        self._window_samples = window_samples
+        self._poll_seconds = poll_seconds
+        self._wav_writer = wav_writer
+
+        self._buffer: list[np.ndarray] = []
+        self._buffered_len = 0
+        self._start_seq: Optional[int] = None
+        self._last_seq: Optional[int] = None
+
+    def _flush(self, pad: bool) -> None:
+        samples = (
+            np.concatenate(self._buffer) if self._buffer else np.zeros(0, dtype=np.float32)
+        )
+
+        # Defensive: never emit a fabricated window when there's no audio.
+        if samples.size == 0:
+            self._buffer, self._buffered_len = [], 0
+            self._start_seq = None
+            return
+
+        leftover = None
+        if samples.size > self._window_samples:
+            leftover = samples[self._window_samples:]
+            samples = samples[: self._window_samples]
+        elif pad and samples.size < self._window_samples:
+            samples = np.pad(samples, (0, self._window_samples - samples.size))
+
+        self._window_queue.put(AudioWindow(
+            start_sequence=self._start_seq,
+            end_sequence=self._last_seq,
+            samples=samples,
+            is_padded=pad,
+        ))
+
+        if leftover is not None and leftover.size > 0:
+            self._buffer = [leftover]
+            self._buffered_len = leftover.size
+            # start_seq for the new window is technically mid-chunk here; the
+            # chunk sequence that produced the leftover is the best available
+            # approximation. Whisper only reads the sample data, so this is
+            # fine; don't build timing/re-sync logic on these fields without
+            # accounting for a window start that straddles a chunk.
+            self._start_seq = self._last_seq
+        else:
+            self._buffer, self._buffered_len = [], 0
+            self._start_seq = None
+
+    def run(self) -> None:
+        """Consume the ring queue until STOP, emitting fixed-length windows."""
+        while True:
+            item = self._ring_queue.pop()
+
+            if item is None:
+                # Empty ring queue: back off instead of busy-spinning.
+                threading.Event().wait(self._poll_seconds)
+                continue
+
+            if item is STOP:
+                if self._buffer:
+                    self._flush(pad=True)
+                if self._wav_writer is not None:
+                    self._wav_writer.close()
+                self._window_queue.put(STOP)
+                break
+
+            chunk: AudioChunk = item
+            if self._wav_writer is not None:
+                self._wav_writer.write(chunk.samples)
+            float_samples = chunk.samples.astype(np.float32) / AudioConfig.PCM16_SCALE
+            if self._start_seq is None:
+                self._start_seq = chunk.sequence
+            self._last_seq = chunk.sequence
+            self._buffer.append(float_samples)
+            self._buffered_len += float_samples.size
+
+            if self._buffered_len >= self._window_samples:
+                self._flush(pad=False)

@@ -24,5 +24,20 @@ class PipelineConfig:
     NUM_WORKERS: int = 4
     RING_SIZE: int = 200
 
-    # Polling interval (seconds) when the ring queue is empty.
+    # Polling interval (seconds) when a queue is empty.
     CONSUMER_POLL_SECONDS: float = 0.001
+
+
+class MelConfig:
+    """Mel-spectrogram feature extraction configuration.
+
+    Windows of audio are accumulated into fixed-length segments (default 30 s)
+    before log-Mel features are extracted for STT ingestion.
+    """
+
+    SAMPLE_RATE: int = 16000
+    WINDOW_SECONDS: int = 30
+    WINDOW_SAMPLES: int = SAMPLE_RATE * WINDOW_SECONDS  # 480,000
+    N_FFT: int = 400
+    HOP_LENGTH: int = 160
+    N_MELS: int = 80

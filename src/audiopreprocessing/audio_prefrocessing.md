@@ -143,7 +143,10 @@ THE APPROACH :
          0 → 1 → 2 → 3 → 4 ...
                      ▼
                     Ring Queue
-
+                    
+                    │
+                    ▼
+         
                     
 
 import queue
@@ -351,6 +354,200 @@ with sd.InputStream(
     print("Listening...")
 
     threading.Event().wait()
+
+
+
+# =============================================================================
+# MEL-SPECTROGRAM FEATURE-EXTRACTION STAGE
+# (Window accumulator + log-Mel extractor, feeding the STT consumer)
+# =============================================================================
+
+Now that ordered mono 16 kHz PCM16 chunks reach the ring queue, a new stage
+buffers them into fixed-length windows and converts each window to an 80-bin
+log-Mel spectrogram before handing it to the STT backend.
+
+## CURRENT FULL PIPELINE LAYOUT
+
+    Producer (FileProducer / MicrophoneProducer)
+        │  (AudioConfig.INPUT_SAMPLE_RATE = 48000, BLOCK_SIZE = 960 = 20 ms)
+        ▼
+    InputQueue  ← SequenceAssigner (0,1,2,3,...)
+        ▼
+    WorkerPool (NUM_WORKERS = 4)  → MonoResamplerPcm16Processor
+        │    stereo→mono → resample 48k→16k → PCM16 (int16)
+        ▼
+    CompletedQueue
+        ▼
+    ReorderBuffer (reassembles in sequence order; skips ProcessingFailure)
+        ▼
+    RingQueue (ordered 16 kHz PCM16 chunks, RING_SIZE = 200)
+        ▼
+    WindowAccumulator  ──(optional)──▶ Pcm16WavWriter → output_wav
+        │  (buffers to WINDOW_SAMPLES = 480,000 = 30 s; overshoot carried over)
+        ▼
+    window_queue (CompletedQueue)
+        ▼
+    Consumer → MelSpectrogramExtractor.extract(window) → (80, ~3000) log-Mel
+        ▼
+    SpeechToTextSink.feed(mel)
+        │
+        ▼
+    Whisper STT (separate script: python -m ...stt.whisper_transcriber)
+
+Offline end-to-end usage (48 kHz WAV → enhanced WAV → transcript):
+
+    python -m src.audiopreprocessing.main \
+        --input my_voice_raw.wav --output newenhanced.wav
+    python -m src.audiopreprocessing.stt.whisper_transcriber \
+        --input newenhanced.wav --output newenhanced.txt
+
+## Configuration (constants/audio.py -> MelConfig)
+
+    class MelConfig:
+        SAMPLE_RATE: int = 16000
+        WINDOW_SECONDS: int = 30
+        WINDOW_SAMPLES: int = SAMPLE_RATE * WINDOW_SECONDS   # 480,000
+        N_FFT: int = 400
+        HOP_LENGTH: int = 160
+        N_MELS: int = 80
+
+## AudioWindow model (models/audio_window.py)
+
+    @dataclass(frozen=True)
+    class AudioWindow:
+        start_sequence: int      # first chunk folded into this window
+        end_sequence: int        # last chunk folded into this window
+        samples: np.ndarray      # float32 normalized [-1,1], length == WINDOW_SAMPLES
+        is_padded: bool          # True if zero-padded to reach a full window
+
+    __post_init__ validates dtype == float32 and ndim == 1.
+
+## WindowAccumulator (services/window_accumulator.py)
+
+Reads ordered PCM16 chunks from the ring queue, converts each to float32 via
+`chunk.samples / AudioConfig.PCM16_SCALE` (32767), and buffers them until at
+least `WINDOW_SAMPLES` (480,000) samples are present. On full: `_flush(pad=False)`
+emits an `AudioWindow` and resets the buffer. On the producer's STOP sentinel:
+if a partial buffer remains it is `_flush(pad=True)` zero-padded, then STOP is
+forwarded to the window queue.
+
+  * `_flush(pad)` concatenates buffered chunks, zero-pads a short window when
+    `pad` is True, then enqueues. If the buffer exceeds `WINDOW_SAMPLES`, the
+    overshoot is NOT dropped — it is carried into the next window (the buffer
+    is reset to the leftover samples) so no audio is lost at window seams.
+    This matters because `resample_poly` chunk lengths are not guaranteed to be
+    an exact multiple of the window size for arbitrary ratios (e.g. 44.1k), so
+    `buffered_len` can drift past `WINDOW_SAMPLES`.
+  * A defensive guard returns early when there is no audio, so `_flush` never
+    emits a fabricated all-zero padded window.
+  * Note: when overshoot is carried over, the next window's `start_sequence`
+    points at the spilling chunk (a window start can straddle a chunk). Whisper
+    only reads the sample data, so this is fine; don't build wall-clock re-sync
+    logic on the sequence fields without accounting for it.
+  * Empty ring-queue pops back off for `poll_seconds` (from
+    `PipelineConfig.CONSUMER_POLL_SECONDS`, 1 ms) instead of busy-spinning —
+    the same throttled-polling pattern used by the Consumer stage.
+
+## FeatureExtractor / MelSpectrogramExtractor (services/feature_extractor.py)
+
+    class FeatureExtractor(ABC):
+        @abstractmethod
+        def extract(self, window: AudioWindow) -> np.ndarray: ...
+
+    class MelSpectrogramExtractor(FeatureExtractor):
+        def __init__(self, *, n_fft=MelConfig.N_FFT,
+                     hop_length=MelConfig.HOP_LENGTH, n_mels=MelConfig.N_MELS,
+                     sample_rate=MelConfig.SAMPLE_RATE):
+            # note: hop_length is NOT passed to filters.mel
+            self._mel_filters = librosa.filters.mel(sr=sample_rate,
+                                                    n_fft=n_fft, n_mels=n_mels)
+
+        def extract(self, window):
+            stft = librosa.stft(window.samples, n_fft=self._n_fft,
+                                hop_length=self._hop_length, window="hann")
+            power = np.abs(stft) ** 2
+            mel = self._mel_filters @ power
+            log_mel = np.log10(np.clip(mel, a_min=1e-10, a_max=None))
+            log_mel = np.maximum(log_mel, log_mel.max() - 8.0)
+            return ((log_mel + 4.0) / 4.0).astype(np.float32)  # shape (80, ~3000)
+
+Notes:
+  * `librosa.filters.mel` (v0.11.0) does NOT accept `hop_length`; it is only
+    applied to `librosa.stft`.
+  * The final normalization matches Whisper's preprocessing convention; drop it
+    if the STT model expects raw log-Mel instead.
+
+## Consumer changes (services/consumer.py)
+
+`SpeechToTextSink.feed()` now accepts a mel feature array instead of an
+`AudioChunk`:
+
+    class SpeechToTextSink(ABC):
+        @abstractmethod
+        def feed(self, mel: np.ndarray) -> bool: ...
+
+The `Consumer` reads `AudioWindow`s from the window queue, runs
+`extractor.extract(window)`, and forwards the resulting `(80, ~3000)` array to
+`feed()`. `Consumer.consumed_count` now counts mel windows (one per 30 s
+window) rather than raw 20 ms chunks.
+
+## Wiring (services/pipeline_controller.py)
+
+`PipelineController` now constructs `window_queue`, `WindowAccumulator`,
+`MelSpectrogramExtractor`, and a `Pcm16WavWriter` (only when `output_wav` is
+set), and starts additional `window-accumulator` daemon threads between the
+reorder buffer and the consumer:
+
+    self._window_queue = CompletedQueue()
+    if output_wav is not None:
+        wav_writer = Pcm16WavWriter(output_wav, AudioConfig.TARGET_SAMPLE_RATE)
+    self._window_accumulator = WindowAccumulator(
+        self._ring_queue, self._window_queue, wav_writer=wav_writer
+    )
+    self._consumer = Consumer(self._window_queue, self._sink, extractor=...)
+
+Background daemon threads (run()):
+    worker-pool, reorder, window-accumulator, consumer
+The producer runs on the calling thread; on finish the controller joins all
+daemon threads (5 s timeout).
+
+## WAV output stage (utils/audio_utils.py -> Pcm16WavWriter)
+
+`main.py --output newenhanced.wav` streams the ordered mono 16 kHz PCM16 audio
+to disk as it flows through the pipeline. `Pcm16WavWriter` opens the target
+file once (16 kHz / 1 ch / PCM_16) and appends each processed int16 chunk as it
+arrives, closing and flushing on STOP (via `WindowAccumulator.run()`). This
+persists the "enhanced" mono/16k/PCM16 audio before it is consumed for feature
+extraction — the audio saved is independent of (and before) the mel stage.
+
+## Whisper STT stage (stt/whisper_transcriber.py)
+
+Standalone CLI that turns the pipeline output (or any audio file) into text
+using the cached `openai-whisper` model on CPU:
+
+    python -m src.audiopreprocessing.stt.whisper_transcriber \
+        --input newenhanced.wav --model small --output newenhanced.txt
+
+  * `--model` defaults to `base`; cached `small` gives better accuracy on noisy
+    input (e.g. NOIZEUS street 5 dB: base garbles it, small returns close to
+    the reference).
+  * `load_audio_array()` decodes with `soundfile` and resamples to 16 kHz with
+    scipy — this bypasses ffmpeg, which `openai-whisper`'s built-in
+    `load_audio` requires but which is not installed.
+  * FP32 is used on CPU (Whisper's `FP16 not supported on CPU` warning is
+    benign).
+  * Transcript is written to `<input_basename>.txt` (or `--output`).
+
+## Latency tradeoff
+
+This is an intentional architectural batching decision: a 30-second window must
+fill before the first feature array is emitted, so downstream STT now waits up
+to 30 s per window (or until input end, when a short window is zero-padded and
+flushed). The pipeline remains low-latency *up to* the window boundary; a later
+optimization could emit partial/sliding windows if that latency proves
+unacceptable.
+
+
 
 
 

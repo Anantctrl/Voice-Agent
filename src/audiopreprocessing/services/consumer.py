@@ -1,52 +1,57 @@
-"""Consumer stage: reads ordered chunks from the ring queue and dispatches to STT.
+"""Consumer stage: extracts features from ordered windows and dispatches to STT.
 
 Per the specification, this stage is a structural seam: the pipeline feeds
-processed chunks to a speech-to-text backend via ``stt.feed(chunk)``. The STT
-backend itself is intentionally not implemented yet.
+log-Mel feature arrays to a speech-to-text backend via ``stt.feed(mel)``. The
+STT backend itself is intentionally not implemented yet.
 """
 
 from abc import ABC, abstractmethod
 from typing import Optional
 
+import numpy as np
+
 from ..constants.audio import PipelineConfig
-from ..models.audio_chunk import AudioChunk
-from .ring_queue import RingQueue
+from ..models.audio_window import AudioWindow
+from .feature_extractor import FeatureExtractor, MelSpectrogramExtractor
 from .producer import STOP
 
 
 class SpeechToTextSink(ABC):
-    """Contract for a consumer that accepts prepared audio chunks."""
+    """Contract for a consumer that accepts extracted feature arrays."""
 
     @abstractmethod
-    def feed(self, chunk: AudioChunk) -> bool:
-        """Accept a prepared chunk. Return True to continue, False to stop."""
+    def feed(self, mel: np.ndarray) -> bool:
+        """Accept a prepared log-Mel feature array. Return True to continue, False to stop."""
 
 
 class NoOpSpeechToTextSink(SpeechToTextSink):
-    """Placeholder sink: consumes chunks without doing anything yet."""
+    """Placeholder sink: consumes features without doing anything yet."""
 
-    def feed(self, chunk: AudioChunk) -> bool:
+    def feed(self, mel: np.ndarray) -> bool:
         return True
 
 
 class Consumer:
-    """Polls the ring queue and forwards each ordered chunk to the STT sink."""
+    """Polls the window queue, extracts features, and forwards each mel to the STT sink."""
 
     def __init__(
         self,
-        ring_queue: RingQueue,
+        window_queue,
         sink: SpeechToTextSink,
         *,
+        extractor: Optional[FeatureExtractor] = None,
         poll_seconds: float = PipelineConfig.CONSUMER_POLL_SECONDS,
     ) -> None:
-        self._ring_queue = ring_queue
+        self._window_queue = window_queue
         self._sink = sink
+        self._extractor = extractor or MelSpectrogramExtractor()
         self._poll_seconds = poll_seconds
         self._consumed = 0
         self._stopped = False
 
     @property
     def consumed_count(self) -> int:
+        """Number of feature windows consumed (one per fixed-length window)."""
         return self._consumed
 
     @property
@@ -54,11 +59,11 @@ class Consumer:
         return self._stopped
 
     def run(self) -> None:
-        """Consume the ring queue until STOP or the sink halts."""
+        """Consume the window queue until STOP or the sink halts."""
         import threading
 
         while True:
-            item = self._ring_queue.pop()
+            item = self._window_queue.get()
             if item is None:
                 if self._stopped:
                     break
@@ -67,9 +72,10 @@ class Consumer:
             if item is STOP:
                 self._stopped = True
                 break
-            chunk: AudioChunk = item
+            window: AudioWindow = item
+            mel = self._extractor.extract(window)
             self._consumed += 1
-            continue_ = self._sink.feed(chunk)
+            continue_ = self._sink.feed(mel)
             if not continue_:
                 self._stopped = True
                 break
