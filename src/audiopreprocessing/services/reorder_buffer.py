@@ -8,7 +8,7 @@ from typing import Optional
 import logging
 
 from ..models.audio_chunk import AudioChunk, ProcessingFailure
-from .ring_queue import CompletedQueue, RingQueue
+from .ring_queue import CompletedQueue
 from .producer import STOP
 
 logger = logging.getLogger(__name__)
@@ -17,9 +17,9 @@ logger = logging.getLogger(__name__)
 class ReorderBuffer:
     """Waits for the next expected index and forwards a strictly ordered stream."""
 
-    def __init__(self, completed_queue: CompletedQueue, ring_queue: RingQueue) -> None:
+    def __init__(self, completed_queue: CompletedQueue, output_queue: CompletedQueue) -> None:
         self._completed_queue = completed_queue
-        self._ring_queue = ring_queue
+        self._output_queue = output_queue
         self._expected = 0
         self._pending: dict[int, AudioChunk | ProcessingFailure] = {}
         self._failed = 0
@@ -33,7 +33,7 @@ class ReorderBuffer:
         while True:
             item = self._completed_queue.get()
             if item is STOP:
-                self._ring_queue.push(STOP)
+                self._output_queue.put(STOP)
                 self._completed_queue.task_done()
                 break
 
@@ -49,7 +49,5 @@ class ReorderBuffer:
                     )
                     self._failed += 1
                 else:
-                    overflowed = self._ring_queue.push(ordered)
-                    if overflowed:
-                        print("Ring queue full - oldest chunk discarded")
+                    self._output_queue.put(ordered)
                 self._expected += 1

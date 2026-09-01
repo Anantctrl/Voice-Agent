@@ -21,7 +21,7 @@
     ▼       ▼           ▼           ▼           ▼                │
     └───────┼───────────┴───────────┴───────────┘                │
             ▼                                                     │
-      CompletedQueue                                             │
+      CompletedQueue-1                                             │
             │                                                     │
             ▼                                                     │
       Reorder Buffer                                              │
@@ -29,14 +29,18 @@
         skips ProcessingFailure / failed_count                   │
             │                                                     │
             0 → 1 → 2 → 3 → 4 ...                                │
-            ▼                                                     │
+            ▼
+        completequeue-2           
+            |                    
+          GTRN                                                   │
+            | 
         Ring Queue                                               │
    (ordered 16 kHz PCM16 chunks, RING_SIZE=200)      ────────────┘
             │
             ▼
    ┌───────────────────────────────────────────────┐
    │        WindowAccumulator                      │
-   │   buffers to WINDOW_SAMPLES = 480,000 (30 s)  │────(optional)──▶ Pcm16WavWriter ──▶ output_wav
+   │   buffers to WINDOW_SAMPLES = 480,000 (30 s)  │────(optional)──▶   Pcm16WavWriter ──▶ output_wav
    │   overshoot carried to next window            │
    └───────────────────────────────────────────────┘
             │

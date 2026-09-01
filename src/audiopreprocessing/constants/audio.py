@@ -28,6 +28,27 @@ class PipelineConfig:
     CONSUMER_POLL_SECONDS: float = 0.001
 
 
+class GTRNConfig:
+    """GTRN noise-suppression stage configuration (WebRTC-based).
+
+    The GTRN stage denoises ordered 16 kHz mono PCM16 chunks before they reach
+    the window accumulator. It runs a single stateful instance sequentially.
+    """
+
+    SAMPLE_RATE: int = 16000
+    NUM_CHANNELS: int = 1
+
+    NS_LEVEL: int = 2            # 0-3 => 6/12/18/21 dB suppression
+    NOISE_SUPPRESSION: bool = True
+    HIGH_PASS_FILTER: bool = True
+    AUTO_GAIN_CONTROL: bool = True
+    ECHO_CANCELLATION: bool = False
+
+    AGC_GAIN_DB: float = 8.0
+    AGC_MAX_GAIN_DB: float = 50.0
+    HEADROOM_DB: float = 5.0
+
+
 class MelConfig:
     """Mel-spectrogram feature extraction configuration.
 
