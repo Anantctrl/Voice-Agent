@@ -15,6 +15,7 @@ from ..utils.audio_utils import Pcm16WavWriter
 from .chunk_processor import ChunkProcessor, MonoResamplerPcm16Processor
 from .consumer import Consumer, NoOpSpeechToTextSink, SpeechToTextSink
 from .feature_extractor import FeatureExtractor, MelSpectrogramExtractor
+from .gtrn import GTRNProcessor, GTRNWorker
 from .input_queue import InputQueue
 from .producer import Producer
 from .reorder_buffer import ReorderBuffer
@@ -53,6 +54,7 @@ class PipelineController:
         self._input_queue = InputQueue(maxsize=max_input_queue)
         self._assigner = SequenceAssigner()
         self._completed_queue = CompletedQueue()
+        self._gtrn_queue = CompletedQueue()
         self._ring_queue = RingQueue(size=ring_size)
         self._window_queue = CompletedQueue()
 
@@ -64,7 +66,11 @@ class PipelineController:
             self._processor,
             num_workers=num_workers,
         )
-        self._reorder = ReorderBuffer(self._completed_queue, self._ring_queue)
+        self._reorder = ReorderBuffer(self._completed_queue, self._gtrn_queue)
+
+        self._gtrn = GTRNWorker(
+            self._gtrn_queue, self._ring_queue, GTRNProcessor()
+        )
 
         wav_writer: Optional[Pcm16WavWriter] = None
         if output_wav is not None:
@@ -83,12 +89,10 @@ class PipelineController:
         """Start background stages and run the producer on the calling thread."""
         import threading
 
-        # START PRODUCER FIRST - so data flows immediately when workers start
-        self._producer.start()
-
         threads = [
             threading.Thread(target=self._worker_pool.run, name="worker-pool", daemon=True),
             threading.Thread(target=self._reorder.run, name="reorder", daemon=True),
+            threading.Thread(target=self._gtrn.run, name="gtrn", daemon=True),
             threading.Thread(
                 target=self._window_accumulator.run,
                 name="window-accumulator",
@@ -97,10 +101,12 @@ class PipelineController:
             threading.Thread(target=self._consumer.run, name="consumer", daemon=True),
         ]
         for thread in threads:
-            thread.start()
+            thread.start()          # workers are LISTENING before any chunk exists
 
-        # REMOVED: self._input_queue.join()
-        # No longer block waiting for queue to drain; producer runs concurrently
+        try:
+            self._producer.start()  # now chunks arrive into a queue that's already being drained
+        finally:
+            self._input_queue.join()
 
         for thread in threads:
             thread.join(timeout=5.0)

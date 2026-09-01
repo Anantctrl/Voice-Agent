@@ -66,11 +66,17 @@ class RingQueue:
             return False
 
     def pop(self) -> Optional[Any]:
-        """Pop and return the oldest item (or None when empty)."""
+        """Pop and return the oldest item (or None when empty).
+
+        Wakes any thread blocked in :meth:`push`, since removing an item frees
+        a slot in the ring buffer.
+        """
         with self._lock:
             if not self._buffer:
                 return None
-            return self._buffer.popleft()
+            item = self._buffer.popleft()
+            self._not_full.notify()
+            return item
 
     def close(self) -> None:
         with self._lock:

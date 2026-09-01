@@ -549,5 +549,220 @@ unacceptable.
 
 
 
+<!-- GTRN -->
+
+Ah, understood. **GTRN is for NS (noise suppression), not ASR.** So the GTRN does **not** return text.
+
+Your pipeline is:
+
+```text
+Complete Queue
+      │
+      │ audio frames
+      ▼
+    GTRN
+      │
+      │ processed audio
+      ▼
+ Next Queue
+```
+
+The GTRN input/output should therefore be audio-oriented.
+
+### Recommended interface
+
+```python
+from dataclasses import dataclass
+
+
+@dataclass
+class GTRNInput:
+    sequence_no: int
+    audio: bytes
+    timestamp: int
+    is_end: bool = False
+
+
+@dataclass
+class GTRNOutput:
+    sequence_no: int
+    audio: bytes
+    timestamp: int
+    is_end: bool = False
+```
+
+The processing is:
+
+```text
+Input #1 ──► GTRN ──► Clean Audio #1
+Input #2 ──► GTRN ──► Clean Audio #2
+Input #3 ──► GTRN ──► Clean Audio #3
+Input #4 ──► GTRN ──► Clean Audio #4
+```
+
+And because GTRN is **stateful**, the same GTRN instance must process them sequentially:
+
+```text
+              Stateful GTRN
+                   │
+audio #1 ─────────►│
+                   │
+audio #2 ─────────►│
+                   │
+audio #3 ─────────►│
+                   │
+audio #4 ─────────►│
+```
+### Simplified worker
+
+```python
+import queue
+import threading
+from dataclasses import dataclass
+
+
+@dataclass
+class GTRNInput:
+ input audio
+
+@dataclass
+class GTRNOutput:
+ output audio 
+
+class GTRN:
+    """
+    Stateful GTRN / NS processor.
+    """
+
+    def __init__(self):
+        self.state = None
+
+    def process(self, audio: bytes) -> bytes:
+        """
+        Call the actual GTRN/NS model here.
+
+        Input:
+            noisy audio
+
+        Output:
+            enhanced / denoised audio
+        """
+
+        clean_audio = self.run_gtrn(audio)
+
+        return clean_audio
+
+    def run_gtrn(self, audio: bytes) -> bytes:
+        # Replace with actual GTRN implementation
+        return audio
+
+
+class GTRNWorker:
+
+    def __init__(self, complete_queue: queue.Queue):
+        self.complete_queue = complete_queue
+
+        # ONE stateful GTRN instance
+        self.gtrn = GTRN()
+
+        self.running = False
+
+        self.thread = threading.Thread(
+            target=self._run,
+            daemon=True
+        )
+
+    def start(self):
+        self.running = True
+        self.thread.start()
+
+    def stop(self):
+        self.running = False
+
+        # Wake worker
+        self.complete_queue.put(None)
+
+        self.thread.join()
+
+    def _run(self):
+
+        while self.running:
+
+            item = self.complete_queue.get()
+
+            try:
+
+                if item is None:
+                    break
+
+                # -----------------------------
+                # Sequential GTRN processing
+                # -----------------------------
+
+                clean_audio = self.gtrn.process(
+                    item.audio
+                )
+
+                output = GTRNOutput(
+                    sequence_no=item.sequence_no,
+                    audio=clean_audio,
+                    timestamp=item.timestamp,
+                    is_end=item.is_end
+                )
+
+                # Pass to next stage
+                self.send_to_next_queue(output)
+
+            finally:
+                self.complete_queue.task_done()
+
+    def send_to_next_queue(self, output: GTRNOutput):
+        """
+        Connect this to the next queue.
+        """
+        print(
+            f"GTRN output: "
+            f"seq={output.sequence_no}, "
+            f"bytes={len(output.audio)}"
+        )
+```
+
+### The important requirement
+
+Your GTRN worker should guarantee:
+
+```text
+Complete Queue
+
+seq 1
+  ↓
+GTRN
+  ↓
+clean audio 1
+  ↓
+next queue
+
+seq 2
+  ↓
+GTRN
+  ↓
+clean audio 2
+  ↓
+next queue
+
+seq 3
+  ↓
+GTRN
+  ↓
+clean audio 3
+  ↓
+next queue
+```
+
+**No text is involved.**
+
+The key design question now is whether your **Complete Queue contains fixed-size audio frames** (for example 10 ms/20 ms/40 ms PCM frames) or whether each queue item can have variable-sized audio. That affects how the GTRN state and buffering should be implemented.
+
+
 
 

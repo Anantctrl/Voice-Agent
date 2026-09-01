@@ -45,11 +45,19 @@ class Producer(ABC):
         """Signal end-of-input by enqueueing the stop sentinel."""
         self._input_queue.put(STOP)
 
-    def _emit(self, block: np.ndarray) -> None:
-        """Assign a sequence number and enqueue (dropping on overflow)."""
+    def _emit(self, block: np.ndarray, *, blocking: bool = False) -> None:
+        """Assign a sequence number and enqueue.
+
+        When ``blocking`` is True, wait for space instead of dropping, so
+        offline replay never loses frames. Live capture defaults to dropping
+        on overflow so the microphone callback never blocks.
+        """
         index = self._sequences.next()
+        sample = np.asarray(block, dtype=np.float32).copy()
+        if blocking:
+            self._input_queue.put((index, sample))
+            return
         try:
-            sample = np.asarray(block, dtype=np.float32).copy()
             self._input_queue.put_nowait((index, sample))
         except QueueFullError:
             print(f"Input queue full - dropping frame {index}")
@@ -136,7 +144,7 @@ class FileProducer(Producer):
             self._channels = snd.channels
             block = snd.read(frames=self._block_size, dtype="float32", always_2d=True)
             while block.shape[0] > 0:
-                self._emit(block)
+                self._emit(block, blocking=True)
                 block = snd.read(frames=self._block_size, dtype="float32", always_2d=True)
 
         print(
