@@ -1,0 +1,11 @@
+# Secrets — never commit live keys (.env.example is the template)
+.env
+
+# Model binaries (auto-downloaded on first run)
+*.onnx
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
