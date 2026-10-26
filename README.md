@@ -12,8 +12,7 @@ Package layout: `src/voice_agent/` (`audio/`, `vad/`, `providers/`, `pipeline/`,
 ## Quickstart
 
 ```powershell
-cd D:\v
-copy .env.example .env   # fill DEEPGRAM_API_KEY, GROQ_API_KEY, ELEVENLABS_API_KEY
+   # fill DEEPGRAM_API_KEY, GROQ_API_KEY, ELEVENLABS_API_KEY
 pip install -e .         # or: pip install sounddevice numpy onnxruntime websockets httpx groq pydantic-settings colorama
 python -m voice_agent.main --no-audio   # smoke test, no hardware
 python -m voice_agent.main --check-mic  # 5 s mic self-test, no cloud keys needed
